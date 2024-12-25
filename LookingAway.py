@@ -122,5 +122,3 @@ with mp_face_mesh.FaceMesh(min_detection_confidence=0.5, max_num_faces=2) as fac
 
 cap.release()
 cv2.destroyAllWindows()
-
-

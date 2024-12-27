@@ -14,6 +14,8 @@ NOSE_TIP = 1
 
 # Global variables to store the initial head pose for up to five faces
 initial_yaws = [None] * 5  # List to store the initial yaw for up to five faces
+look_away_counters = [0] * 5  # Counter for each person
+look_away_flags = [False] * 5  # Flag to track ongoing look-away state
 
 # Function to get 3D coordinates of landmarks
 def get_3d_landmark(face_landmarks, idx, image_shape):
@@ -60,7 +62,7 @@ def get_head_pose(left_eye_3d, right_eye_3d, nose_3d, chin_3d, image_shape):
 def rotation_vector_to_euler_angles(rotation_vector):
     rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
     sy = np.sqrt(rotation_matrix[0, 0]*2 + rotation_matrix[1, 0]*2)
-    singular = sy < 1e-6  # Singular condition
+    singular = sy < 1e-6
 
     if not singular:
         x = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
@@ -80,20 +82,9 @@ def is_looking_away_relative(current_yaw, initial_yaw, gaze_threshold=20):
 
 # Function to check if two gaze lines intersect
 def do_gaze_lines_intersect(eye1_center, eye2_center, gaze1_dir, gaze2_dir):
-    # Calculate the distance between the centers of the two eyes
     distance_between_eyes = np.linalg.norm(eye1_center - eye2_center)
-    
-    # Calculate the cosine of the angle between the two gaze direction vectors
-    angle_diff = np.abs(np.dot(gaze1_dir, gaze2_dir))  # Cosine of the angle between vectors
-    
-    # Adjust the distance and angle thresholds for people sitting farther apart
+    angle_diff = np.abs(np.dot(gaze1_dir, gaze2_dir))
     return distance_between_eyes < 1000 and angle_diff < 0.8  # Adjusted thresholds
-
-# Function to draw the gaze direction line from the eyes
-def draw_gaze_line(image, eye_center, direction_vector, length=100, color=(0, 255, 0)):
-    end_point = (int(eye_center[0] + direction_vector[0] * length),
-                 int(eye_center[1] + direction_vector[1] * length))
-    cv2.line(image, tuple(eye_center.astype(int)), end_point, color, 2)
 
 # Initialize webcam and face mesh detector
 cap = cv2.VideoCapture(0)
@@ -147,50 +138,55 @@ with mp_face_mesh.FaceMesh(min_detection_confidence=0.5, max_num_faces=5) as fac
                 # Check if the person is looking away based on yaw difference from initial yaw
                 is_looking_away = is_looking_away_relative(yaw, initial_yaws[idx], GAZE_AWAY_THRESHOLD)
 
-                # Calculate gaze direction (vector from left eye to right eye)
-                gaze_direction = right_eye_3d[:2] - left_eye_3d[:2]
-                gaze_direction = gaze_direction / np.linalg.norm(gaze_direction)  # Normalize vector
-                eye_centers.append(np.mean([left_eye_3d[:2], right_eye_3d[:2]], axis=0))
-                gaze_directions.append(gaze_direction)
+                # Only increment look-away counter once per look-away event
+                if is_looking_away:
+                    if not look_away_flags[idx]:  # If not already flagged as looking away
+                        look_away_counters[idx] += 1  # Increment look-away counter
+                        look_away_flags[idx] = True   # Set the look-away flag
+                        print(f"Alert: Person {idx+1} is looking away! Look-away count: {look_away_counters[idx]}")
+                else:
+                    look_away_flags[idx] = False  # Reset the flag when the person is not looking away
 
                 # Draw gaze direction line
-                draw_gaze_line(image, np.mean([left_eye_3d[:2], right_eye_3d[:2]], axis=0), gaze_direction)
+                gaze_direction = (right_eye_3d[:2] - left_eye_3d[:2]) / np.linalg.norm(right_eye_3d[:2] - left_eye_3d[:2])
+                eye_center = np.mean([left_eye_3d[:2], right_eye_3d[:2]], axis=0)
+                eye_centers.append(eye_center)
+                gaze_directions.append(gaze_direction)
+                end_point = (int(eye_center[0] + gaze_direction[0] * 100), int(eye_center[1] + gaze_direction[1] * 100))
+                cv2.line(image, tuple(eye_center.astype(int)), end_point, (0, 255, 0), 2)
 
-                # Draw face landmarks (optional)
-                mp_drawing.draw_landmarks(image, face_landmarks, mp_face_mesh.FACEMESH_TESSELATION)
-
-                # Check if the person is looking away
+                # Draw bounding box if the person is looking away
                 if is_looking_away:
-                    # Draw a red rectangle around the face
                     face_x_min = int(min(face_landmarks.landmark[LEFT_EYE[0]].x, face_landmarks.landmark[RIGHT_EYE[0]].x) * image.shape[1]) - 50
                     face_x_max = int(max(face_landmarks.landmark[LEFT_EYE[0]].x, face_landmarks.landmark[RIGHT_EYE[0]].x) * image.shape[1]) + 50
                     face_y_min = int(min(face_landmarks.landmark[LEFT_EYE[0]].y, face_landmarks.landmark[CHIN].y) * image.shape[0]) - 50
                     face_y_max = int(max(face_landmarks.landmark[LEFT_EYE[0]].y, face_landmarks.landmark[CHIN].y) * image.shape[0]) + 50
-                    face_rects.append((face_x_min, face_y_min, face_x_max, face_y_max))
+                    cv2.rectangle(image, (face_x_min, face_y_min), (face_x_max, face_y_max), (0, 0, 255), 2)
 
-                    cv2.putText(image, f'ALERT: Looking away! (Yaw: {yaw:.2f})', (50, 100 + idx*30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-                    print(f"Alert: Person {idx+1} is looking away! (Current Yaw: {yaw:.2f}, Initial Yaw: {initial_yaws[idx]:.2f})")
+                # Draw face mesh
+                mp_drawing.draw_landmarks(
+                    image, face_landmarks, mp_face_mesh.FACEMESH_CONTOURS,
+                    mp_drawing.DrawingSpec(color=(80, 110, 10), thickness=1, circle_radius=1),
+                    mp_drawing.DrawingSpec(color=(80, 256, 121), thickness=1, circle_radius=1)
+                )
 
-            # If there are at least two faces detected, check gaze intersections between all pairs
+                # Display the look-away count on the screen for each person
+                cv2.putText(image, f'Look-aways: {look_away_counters[idx]}',
+                            (50, 130 + idx * 30),  # Adjust the position as needed
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+
+            # Check for gaze interactions between people
             for i in range(len(eye_centers)):
-                for j in range(i+1, len(eye_centers)):
+                for j in range(i + 1, len(eye_centers)):
                     if do_gaze_lines_intersect(eye_centers[i], eye_centers[j], gaze_directions[i], gaze_directions[j]):
-                        # Draw an alert message on the image
-                        cv2.putText(image, 'ALERT: Gaze directions intersect!', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 
-                                    1, (0, 0, 255), 2, cv2.LINE_AA)
-                        print(f"Alert: Gaze directions of Person {i+1} and Person {j+1} are intersecting!")
-                        # Prevent "looking away" alert if gazes are intersecting
-                        face_rects.clear()  # Clear face rectangles if gazes intersect
+                        cv2.putText(image, "Gaze Interaction Detected", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # Highlight the faces of those looking away
-        for (x_min, y_min, x_max, y_max) in face_rects:
-            cv2.rectangle(image, (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)
+        # Display the frame
+        cv2.imshow("Gaze Tracking with Interaction Detection", image)
 
-        # Show the final image with gaze interaction and looking-away alerts
-        cv2.imshow('Gaze and Head Pose Detection', image)
-        if cv2.waitKey(5) & 0xFF == 27:  # Press 'ESC' to exit
+        if cv2.waitKey(5) & 0xFF == 27:
             break
 
+# Release the webcam and close all windows
 cap.release()
 cv2.destroyAllWindows()
